@@ -51,16 +51,19 @@ use std::task::{Context, Poll};
 ///
 /// struct HelloWorld;
 ///
+/// struct HelloWorldToken();
+///
 /// impl Service<Request<Vec<u8>>> for HelloWorld {
 ///     type Response = Response<Vec<u8>>;
 ///     type Error = http::Error;
 ///     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+///     type Token = HelloWorldToken;
 ///
-///     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-///         Poll::Ready(Ok(()))
+///     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::Token, Self::Error>> {
+///         Poll::Ready(Ok(HelloWorldToken()))
 ///     }
 ///
-///     fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
+///     fn call(&mut self, req: Request<Vec<u8>>, _token: Self::Token) -> Self::Future {
 ///         // create the body
 ///         let body: Vec<u8> = "hello, world!\n"
 ///             .as_bytes()
@@ -145,20 +148,22 @@ use std::task::{Context, Poll};
 ///     T::Future: 'static,
 ///     T::Error: From<Expired> + 'static,
 ///     T::Response: 'static
+///     T::Token: 'static
 /// {
 ///     type Response = T::Response;
 ///     type Error = T::Error;
 ///     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+///     type Token = T::Token;
 ///
-///     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+///     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::Token, Self::Error>> {
 ///        self.inner.poll_ready(cx).map_err(Into::into)
 ///     }
 ///
-///     fn call(&mut self, req: Request) -> Self::Future {
+///     fn call(&mut self, req: Request, token: Self::Token) -> Self::Future {
 ///         let timeout = tokio_timer::delay_for(self.timeout)
 ///             .map(|_| Err(Self::Error::from(Expired)));
 ///
-///         let fut = Box::pin(self.inner.call(req));
+///         let fut = Box::pin(self.inner.call(req, token));
 ///         let f = futures::select(fut, timeout)
 ///             .map(|either| either.factor_first().0);
 ///
@@ -206,7 +211,10 @@ pub trait Service<Request> {
     /// The future response value.
     type Future: Future<Output = Result<Self::Response, Self::Error>>;
 
-    /// Returns `Poll::Ready(Ok(()))` when the service is able to process requests.
+    /// The token produced by the service.
+    type Token;
+
+    /// Returns `Poll::Ready(Ok(Token))` when the service is able to process requests.
     ///
     /// If the service is at capacity, then `Poll::Pending` is returned and the task
     /// is notified when the service becomes ready again. This function is
@@ -216,24 +224,16 @@ pub trait Service<Request> {
     /// If `Poll::Ready(Err(_))` is returned, the service is no longer able to service requests
     /// and the caller should discard the service instance.
     ///
-    /// Once `poll_ready` returns `Poll::Ready(Ok(()))`, a request may be dispatched to the
+    /// Once `poll_ready` returns `Poll::Ready(Ok(Token))`, a request may be dispatched to the
     /// service using `call`. Until a request is dispatched, repeated calls to
-    /// `poll_ready` must return either `Poll::Ready(Ok(()))` or `Poll::Ready(Err(_))`.
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>>;
+    /// `poll_ready` must return either `Poll::Ready(Ok(Token))` or `Poll::Ready(Err(_))`.
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::Token, Self::Error>>;
 
     /// Process the request and return the response asynchronously.
     ///
-    /// This function is expected to be callable off task. As such,
-    /// implementations should take care to not call `poll_ready`.
-    ///
-    /// Before dispatching a request, `poll_ready` must be called and return
-    /// `Poll::Ready(Ok(()))`.
-    ///
-    /// # Panics
-    ///
-    /// Implementations are permitted to panic if `call` is invoked without
-    /// obtaining `Poll::Ready(Ok(()))` from `poll_ready`.
-    fn call(&mut self, req: Request) -> Self::Future;
+    /// Processing a request requires a `Token`, which must be obtained from a successful call
+    /// to `poll_ready`.
+    fn call(&mut self, req: Request, token: Self::Token) -> Self::Future;
 }
 
 impl<'a, S, Request> Service<Request> for &'a mut S
@@ -243,13 +243,14 @@ where
     type Response = S::Response;
     type Error = S::Error;
     type Future = S::Future;
+    type Token = S::Token;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), S::Error>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<S::Token, S::Error>> {
         (**self).poll_ready(cx)
     }
 
-    fn call(&mut self, request: Request) -> S::Future {
-        (**self).call(request)
+    fn call(&mut self, request: Request, token: Self::Token) -> S::Future {
+        (**self).call(request, token)
     }
 }
 
@@ -260,12 +261,13 @@ where
     type Response = S::Response;
     type Error = S::Error;
     type Future = S::Future;
+    type Token = S::Token;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), S::Error>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<S::Token, S::Error>> {
         (**self).poll_ready(cx)
     }
 
-    fn call(&mut self, request: Request) -> S::Future {
-        (**self).call(request)
+    fn call(&mut self, request: Request, token: Self::Token) -> S::Future {
+        (**self).call(request, token)
     }
 }
